@@ -82,12 +82,12 @@ class _Socket(_original_Socket):
         callback = allow_unbound_disappear(
                 _Socket.__state_changed, self, _Socket)
         try:
-            self._state_event = get_hub().loop.io(self.__getsockopt(FD), 1) # read state watcher
+            self._state_event = get_hub().loop.io(self.getsockopt(FD), 1) # read state watcher
             self._state_event.start(callback)
         except AttributeError:
             # for gevent<1.0 compatibility
             from gevent.core import read_event
-            self._state_event = read_event(self.__getsockopt(FD), callback, persist=True)
+            self._state_event = read_event(self.getsockopt(FD), callback, persist=True)
 
     def __state_changed(self, event=None, _evtype=None):
         if self.closed:
@@ -96,7 +96,7 @@ class _Socket(_original_Socket):
             self.__readable.set()
             return
 
-        events = self.__getsockopt(zmq.EVENTS)
+        events = self.getsockopt(zmq.EVENTS)
         if events & zmq.POLLOUT:
             self.__writable.set()
         if events & zmq.POLLIN:
@@ -104,42 +104,27 @@ class _Socket(_original_Socket):
 
     def _wait_write(self):
         self.__writable.clear()
+        self.__state_changed()
         self.__writable.wait()
 
     def _wait_read(self):
         self.__readable.clear()
+        self.__state_changed()
         self.__readable.wait()
 
-    def __notify_waiters(self):
-        """Notifies all waiters about a possible change in the socket state.
-        The waiters can try to read or write.
-        """
-        self.__writable.set()
-        self.__readable.set()
-
     def send(self, data, flags=0, copy=True, track=False):
-        try:
-            return self.__send(data, flags, copy, track)
-        finally:
-            self.__notify_waiters()
-
-    def __send(self, data, flags=0, copy=True, track=False):
         # if we're given the NOBLOCK flag act as normal and let the EAGAIN get raised
         if flags & zmq.NOBLOCK:
             return super(_Socket, self).send(data, flags, copy, track)
-        # ensure the zmq.NOBLOCK flag is part of flags
         flags |= zmq.NOBLOCK
         while True: # Attempt to complete this operation indefinitely, blocking the current greenlet
             try:
-                # attempt the actual call
+                # check events before sending to avoid edge trigger race conditions
+                self._wait_write()
                 return super(_Socket, self).send(data, flags, copy, track)
             except zmq.ZMQError, e:
-                # if the raised ZMQError is not EAGAIN, reraise
                 if e.errno != zmq.EAGAIN:
                     raise
-            # defer to the event loop until we're notified the socket is writable
-            self.__notify_waiters()
-            self._wait_write()
 
     def send_multipart(self, msg_parts, flags=0, copy=True, track=False):
         # send_multipart is not greenlet-safe, i.e. message parts might get
@@ -150,29 +135,15 @@ class _Socket(_original_Socket):
             return super(_Socket, self).send_multipart(msg_parts, flags, copy, track)
 
     def recv(self, flags=0, copy=True, track=False):
-        try:
-            return self.__recv(flags, copy, track)
-        finally:
-            self.__notify_waiters()
-
-    def __recv(self, flags=0, copy=True, track=False):
+        # if we're given the NOBLOCK flag act as normal and let the EAGAIN get raised
         if flags & zmq.NOBLOCK:
             return super(_Socket, self).recv(flags, copy, track)
         flags |= zmq.NOBLOCK
-        while True:
+        while True: # Attempt to complete this operation indefinitely, blocking the current greenlet
             try:
+                # check events before recv'ing to avoid edge trigger race conditions
+                self._wait_read()
                 return super(_Socket, self).recv(flags, copy, track)
             except zmq.ZMQError, e:
                 if e.errno != zmq.EAGAIN:
                     raise
-            self.__notify_waiters()
-            self._wait_read()
-
-    def getsockopt(self, *args, **kw):
-        try:
-            return self.__getsockopt(*args, **kw)
-        finally:
-            self.__notify_waiters()
-
-    def __getsockopt(self, *args, **kw):
-        return _original_Socket.getsockopt(self, *args, **kw)

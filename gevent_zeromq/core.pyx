@@ -43,7 +43,7 @@ cdef class _Socket(_original_Socket):
 
     To ensure that the ``zmq.NOBLOCK`` flag is set and that sending or recieving
     is deferred to the hub if a ``zmq.EAGAIN`` (retry) error is raised.
-    
+
     The `__state_changed` method is triggered when the zmq.FD for the socket is
     marked as readable and triggers the necessary read and write events (which
     are waited for in the recv and send methods).
@@ -78,12 +78,12 @@ cdef class _Socket(_original_Socket):
         callback = allow_unbound_disappear(
                 _Socket.__state_changed, self, _Socket)
         try:
-            self._state_event = get_hub().loop.io(self.__getsockopt(FD), 1) # read state watcher
+            self._state_event = get_hub().loop.io(self.getsockopt(FD), 1) # read state watcher
             self._state_event.start(callback)
         except AttributeError, e:
             # for gevent<1.0 compatibility
             from gevent.core import read_event
-            self._state_event = read_event(self.__getsockopt(FD), callback, persist=True)
+            self._state_event = read_event(self.getsockopt(FD), callback, persist=True)
 
     def __state_changed(self, event=None, _evtype=None):
         if self.closed:
@@ -92,50 +92,35 @@ cdef class _Socket(_original_Socket):
             self.__readable.set()
             return
 
-        cdef int events = self.__getsockopt(EVENTS)
+        cdef int events = self.getsockopt(EVENTS)
         if events & POLLOUT:
             self.__writable.set()
         if events & POLLIN:
             self.__readable.set()
 
-    cdef __notify_waiters(self):
-        """Notifies all waiters about a possible change in the socket state.
-        The waiters can try to read or write.
-        """
-        self.__writable.set()
-        self.__readable.set()
-
     cdef _wait_write(self) with gil:
         self.__writable.clear()
+        self.__state_changed()
         self.__writable.wait()
 
     cdef _wait_read(self) with gil:
         self.__readable.clear()
+        self.__state_changed()
         self.__readable.wait()
 
     cpdef object send(self, object data, int flags=0, copy=True, track=False):
-        try:
-            return self.__send(data, flags, copy, track)
-        finally:
-            self.__notify_waiters()
-
-    cpdef object __send(self, object data, int flags=0, copy=True, track=False):
         # if we're given the NOBLOCK flag act as normal and let the EAGAIN get raised
         if flags & NOBLOCK:
             return _original_Socket.send(self, data, flags, copy, track)
-        # ensure the zmq.NOBLOCK flag is part of flags
         flags = flags | NOBLOCK
         while True: # Attempt to complete this operation indefinitely, blocking the current greenlet
             try:
-                # attempt the actual call
+                # check events before sending to avoid edge trigger race conditions
+                self._wait_write()
                 return _original_Socket.send(self, data, flags, copy, track)
             except ZMQError, e:
-                # if the raised ZMQError is not EAGAIN, reraise
                 if e.errno != EAGAIN:
                     raise
-            # defer to the event loop until we're notified the socket is writable
-            self.__notify_waiters()
-            self._wait_write()
 
     def send_multipart(self, msg_parts, flags=0, copy=True, track=False):
         # send_multipart is not greenlet-safe, i.e. message parts might get
@@ -146,29 +131,15 @@ cdef class _Socket(_original_Socket):
             return _original_Socket.send_multipart(self, msg_parts, flags, copy, track)
 
     cpdef object recv(self, int flags=0, copy=True, track=False):
-        try:
-            return self.__recv(flags, copy, track)
-        finally:
-            self.__notify_waiters()
-
-    cpdef object __recv(self, int flags=0, copy=True, track=False):
+        # if we're given the NOBLOCK flag act as normal and let the EAGAIN get raised
         if flags & NOBLOCK:
             return _original_Socket.recv(self, flags, copy, track)
         flags = flags | NOBLOCK
-        while True:
+        while True: # Attempt to complete this operation indefinitely, blocking the current greenlet
             try:
+                # check events before recv'ing to avoid edge trigger race conditions
+                self._wait_read()
                 return _original_Socket.recv(self, flags, copy, track)
             except ZMQError, e:
                 if e.errno != EAGAIN:
                     raise
-            self.__notify_waiters()
-            self._wait_read()
-
-    def getsockopt(self, *args, **kw):
-        try:
-            return self.__getsockopt(*args, **kw)
-        finally:
-            self.__notify_waiters()
-
-    def __getsockopt(self, *args, **kw):
-        return _original_Socket.getsockopt(self, *args, **kw)
