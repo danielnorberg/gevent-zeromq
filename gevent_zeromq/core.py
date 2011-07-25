@@ -168,7 +168,7 @@ class _Socket(_original_Socket):
             if not self.__recv_lock.acquire(blocking=False):
                 raise ZMQError(EAGAIN)
             self.__recv_lock.release()
-            return _original_Socket.recv(self, flags, copy, track)
+            return super(_Socket, self).recv(flags, copy, track)
 
         # Lock to wait for recv/recv_multipart to complete. This will also ensure that at most
         # one greenlet at a time is waiting for a socket readable state change in case we get EAGAIN.
@@ -192,7 +192,7 @@ class _Socket(_original_Socket):
         # so we use a lock to ensure that there's only ony greenlet
         # calling recv_multipart at any time.
         with self.__recv_lock:
-            return _original_Socket.recv_multipart(self, flags, copy, track)
+            return super(_Socket, self).recv_multipart(flags, copy, track)
 
     def __getsockopt(self, option):
         return super(_Socket, self).getsockopt(option)
