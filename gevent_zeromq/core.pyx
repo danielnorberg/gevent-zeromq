@@ -123,7 +123,7 @@ cdef class _Socket(_original_Socket):
         self.__readable.clear()
         self.__readable.wait()
 
-    def send(self, object data, int flags=0, copy=True, track=False):
+    cpdef send(self, object data, int flags=0, copy=True, track=False):
 
         # if we're given the NOBLOCK flag act as normal and let the EAGAIN get raised
         if flags & NOBLOCK:
@@ -157,7 +157,7 @@ cdef class _Socket(_original_Socket):
         with self.__send_lock:
             return _original_Socket.send_multipart(self, msg_parts, flags, copy, track)
 
-    def recv(self, int flags=0, copy=True, track=False):
+    cpdef recv(self, int flags=0, copy=True, track=False):
 
         # if we're given the NOBLOCK flag act as normal and let the EAGAIN get raised
         if flags & NOBLOCK:
