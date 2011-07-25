@@ -73,6 +73,13 @@ cdef class _Socket(_original_Socket):
     cdef object __weakref__
     cdef public object _state_event
 
+    cdef object __readable_set
+    cdef object __writable_set
+    cdef object __writable_clear
+    cdef object __readable_clear
+    cdef object __writable_wait
+    cdef object __readable_wait
+
     def __init__(self, _Context context, int socket_type):
         super(_Socket, self).__init__(context, socket_type)
         self.__setup_events()
@@ -92,6 +99,15 @@ cdef class _Socket(_original_Socket):
     cdef __setup_events(self) with gil:
         self.__readable = Event()
         self.__writable = Event()
+
+        self.__readable_set = self.__readable.set
+        self.__readable_clear = self.__readable.clear
+        self.__readable_wait = self.__readable.wait
+
+        self.__writable_set = self.__writable.set
+        self.__writable_clear = self.__writable.clear
+        self.__writable_wait = self.__writable.wait
+
         callback = allow_unbound_disappear(
                 _Socket.__state_changed, self, _Socket)
         try:
@@ -105,23 +121,23 @@ cdef class _Socket(_original_Socket):
     def __state_changed(self, event=None, _evtype=None):
         if self.closed:
             # if the socket has entered a close state resume any waiting greenlets
-            self.__writable.set()
-            self.__readable.set()
+            self.__writable_set()
+            self.__readable_set()
             return
 
         cdef int events = self.__getsockopt(EVENTS)
         if events & POLLOUT:
-            self.__writable.set()
+            self.__writable_set()
         if events & POLLIN:
-            self.__readable.set()
+            self.__readable_set()
 
-    cdef _wait_write(self) with gil:
-        self.__writable.clear()
-        self.__writable.wait()
+    cdef inline _wait_write(self) with gil:
+        self.__writable_clear()
+        self.__writable_wait()
 
-    cdef _wait_read(self) with gil:
-        self.__readable.clear()
-        self.__readable.wait()
+    cdef inline _wait_read(self) with gil:
+        self.__readable_clear()
+        self.__readable_wait()
 
     cpdef send(self, object data, int flags=0, copy=True, track=False):
 
@@ -144,8 +160,8 @@ cdef class _Socket(_original_Socket):
                     if e.errno != EAGAIN:
                         raise
                 finally:
-                    # wake a waiting reader as the readable state may have changed and send consumes this event
-                    self.__readable.set()
+                    # wake a waiting reader as the readable state may have changed and send consumes socket state change events
+                    self.__readable_set()
                 # we got EAGAIN, wait for socket to change state
                 self._wait_write()
 
@@ -178,8 +194,8 @@ cdef class _Socket(_original_Socket):
                     if e.errno != EAGAIN:
                         raise
                 finally:
-                    # wake a waiting writer as the writable state may have changed and recv consumes this event
-                    self.__writable.set()
+                    # wake a waiting writer as the writable state may have changed and recv consumes socket state change events
+                    self.__writable_set()
                 # we got EAGAIN, wait for socket to change state
                 self._wait_read()
 
@@ -199,5 +215,5 @@ cdef class _Socket(_original_Socket):
             return self.__getsockopt(option)
         finally:
             # wake a waiting reader and a writer as the writable/readable state may have changed and getsockopt consumes socket state change events
-            self.__writable.set()
-            self.__readable.set()
+            self.__writable_set()
+            self.__readable_set()

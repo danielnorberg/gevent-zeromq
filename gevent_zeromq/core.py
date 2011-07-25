@@ -95,6 +95,15 @@ class _Socket(_original_Socket):
     def __setup_events(self):
         self.__readable = Event()
         self.__writable = Event()
+
+        self.__readable_set = self.__readable.set
+        self.__readable_clear = self.__readable.clear
+        self.__readable_wait = self.__readable.wait
+
+        self.__writable_set = self.__writable.set
+        self.__writable_clear = self.__writable.clear
+        self.__writable_wait = self.__writable.wait
+
         callback = allow_unbound_disappear(
                 _Socket.__state_changed, self, _Socket)
         try:
@@ -108,23 +117,23 @@ class _Socket(_original_Socket):
     def __state_changed(self, event=None, _evtype=None):
         if self.closed:
             # if the socket has entered a close state resume any waiting greenlets
-            self.__writable.set()
-            self.__readable.set()
+            self.__writable_set()
+            self.__readable_set()
             return
 
         events = self.__getsockopt(EVENTS)
         if events & POLLOUT:
-            self.__writable.set()
+            self.__writable_set()
         if events & POLLIN:
-            self.__readable.set()
+            self.__readable_set()
 
     def _wait_write(self):
-        self.__writable.clear()
-        self.__writable.wait()
+        self.__writable_clear()
+        self.__writable_wait()
 
     def _wait_read(self):
-        self.__readable.clear()
-        self.__readable.wait()
+        self.__readable_clear()
+        self.__readable_wait()
 
     def send(self, data, flags=0, copy=True, track=False):
 
@@ -147,8 +156,8 @@ class _Socket(_original_Socket):
                     if e.errno != EAGAIN:
                         raise
                 finally:
-                    # wake a waiting reader as the readable state may have changed and send consumes this event
-                    self.__readable.set()
+                    # wake a waiting reader as the readable state may have changed and send consumes socket state change events
+                    self.__readable_set()
                 # we got EAGAIN, wait for socket to change state
                 self._wait_write()
 
@@ -181,8 +190,8 @@ class _Socket(_original_Socket):
                     if e.errno != EAGAIN:
                         raise
                 finally:
-                    # wake a waiting writer as the writable state may have changed and recv consumes this event
-                    self.__writable.set()
+                    # wake a waiting writer as the writable state may have changed and recv consumes socket state change events
+                    self.__writable_set()
                 # we got EAGAIN, wait for socket to change state
                 self._wait_read()
 
@@ -202,5 +211,5 @@ class _Socket(_original_Socket):
             return self.__getsockopt(option)
         finally:
             # wake a waiting reader and a writer as the writable/readable state may have changed and getsockopt consumes socket state change events
-            self.__writable.set()
-            self.__readable.set()
+            self.__writable_set()
+            self.__readable_set()
