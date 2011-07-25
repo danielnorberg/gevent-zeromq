@@ -7,7 +7,7 @@ from zmq import *
 from zmq.core.context import Context as _original_Context
 from zmq.core.socket import Socket as _original_Socket
 
-from gevent.coros import Semaphore
+from gevent.coros import RLock
 from gevent.event import Event
 from gevent.hub import get_hub
 
@@ -37,14 +37,26 @@ class _Socket(_original_Socket):
     The following methods are overridden:
 
         * send
+        * send_multipart
         * recv
+        * recv_multipart
 
     To ensure that the ``zmq.NOBLOCK`` flag is set and that sending or recieving
     is deferred to the hub if a ``zmq.EAGAIN`` (retry) error is raised.
-    
+
     The `__state_changed` method is triggered when the zmq.FD for the socket is
     marked as readable and triggers the necessary read and write events (which
     are waited for in the recv and send methods).
+
+    However, the readable status of zmq.FD is reset by send and recv, which
+    introduces a potential race condition when a recv or send occurs after
+    zmq.FD becomes readable and before the poll. To resolve this we wake waiting
+    senders after a recv, and vice versa.
+
+    `__send_lock` and `__recv_lock` are used to ensure that at most one greenlet
+    is performing a `send/send_multipart` and `recv/recv_multipart`,
+    respectively. This also ensures that at most one waiting greenlet is awoken
+    by send and recv.
 
     Some doubleunderscore prefixes are used to minimize pollution of
     :class:`zmq.core.socket.Socket`'s namespace.
@@ -54,7 +66,8 @@ class _Socket(_original_Socket):
         self._state_event = None
         super(_Socket, self).__init__(context, socket_type)
         self.__setup_events()
-        self.__send_multipart_semaphore = Semaphore()
+        self.__send_lock = RLock()
+        self.__recv_lock = RLock()
 
     def __del__(self):
         """Unregisters itself from the event loop.
@@ -104,46 +117,78 @@ class _Socket(_original_Socket):
 
     def _wait_write(self):
         self.__writable.clear()
-        self.__state_changed()
         self.__writable.wait()
 
     def _wait_read(self):
         self.__readable.clear()
-        self.__state_changed()
         self.__readable.wait()
 
     def send(self, data, flags=0, copy=True, track=False):
+
         # if we're given the NOBLOCK flag act as normal and let the EAGAIN get raised
-        if flags & zmq.NOBLOCK:
+        if flags & NOBLOCK:
+            # check if the send lock is taken in a non-blocking manner
+            if not self.__send_lock.acquire(blocking=False):
+                raise ZMQError(zmq.EAGAIN)
+            self.__send_lock.release()
             return super(_Socket, self).send(data, flags, copy, track)
-        flags |= zmq.NOBLOCK
-        while True: # Attempt to complete this operation indefinitely, blocking the current greenlet
-            try:
-                # check events before sending to avoid edge trigger race conditions
+
+        # Lock to wait for send/send_multipart to complete. This will also ensure that at most
+        # one greenlet at a time is waiting for a socket writable state change in case we get EAGAIN.
+        with self.__send_lock:
+            flags = flags | NOBLOCK
+            while True: # Attempt to complete this operation indefinitely, blocking the current greenlet
+                try:
+                    return super(_Socket, self).send(data, flags, copy, track)
+                except ZMQError, e:
+                    if e.errno != EAGAIN:
+                        raise
+                finally:
+                    # wake a waiting reader as the readable state may have changed and send consumes this event
+                    self.__readable.set()
+                # we got EAGAIN, wait for socket to change state
                 self._wait_write()
-                return super(_Socket, self).send(data, flags, copy, track)
-            except zmq.ZMQError, e:
-                if e.errno != zmq.EAGAIN:
-                    raise
 
     def send_multipart(self, msg_parts, flags=0, copy=True, track=False):
         # send_multipart is not greenlet-safe, i.e. message parts might get
-        # split up if multiple greenlets call send_multipart on the same socket.
-        # so we use a semaphore to ensure that there's only ony greenlet
-        # calling send_multipart at any time
-        with self.__send_multipart_semaphore:
+        # split up if multiple greenlets call send and/or send_multipart on the same socket.
+        # so we use a lock to ensure that there's only ony greenlet
+        # calling send_multipart at any time.
+        with self.__send_lock:
             return super(_Socket, self).send_multipart(msg_parts, flags, copy, track)
 
     def recv(self, flags=0, copy=True, track=False):
+
         # if we're given the NOBLOCK flag act as normal and let the EAGAIN get raised
-        if flags & zmq.NOBLOCK:
-            return super(_Socket, self).recv(flags, copy, track)
-        flags |= zmq.NOBLOCK
-        while True: # Attempt to complete this operation indefinitely, blocking the current greenlet
-            try:
-                # check events before recv'ing to avoid edge trigger race conditions
+        if flags & NOBLOCK:
+            # check if the recv lock is taken in a non-blocking manner
+            if not self.__recv_lock.acquire(blocking=False):
+                raise ZMQError(zmq.EAGAIN)
+            self.__recv_lock.release()
+            return _original_Socket.recv(self, flags, copy, track)
+
+        # Lock to wait for recv/recv_multipart to complete. This will also ensure that at most
+        # one greenlet at a time is waiting for a socket readable state change in case we get EAGAIN.
+        with self.__recv_lock:
+            flags = flags | NOBLOCK
+            while True: # Attempt to complete this operation indefinitely, blocking the current greenlet
+                try:
+                    return super(_Socket, self).recv(flags, copy, track)
+                except ZMQError, e:
+                    if e.errno != EAGAIN:
+                        raise
+                finally:
+                    # wake a waiting writer as the writable state may have changed and recv consumes this event
+                    self.__writable.set()
+                # we got EAGAIN, wait for socket to change state
                 self._wait_read()
-                return super(_Socket, self).recv(flags, copy, track)
-            except zmq.ZMQError, e:
-                if e.errno != zmq.EAGAIN:
-                    raise
+
+    def recv_multipart(self, flags=0, copy=True, track=False):
+        # recv_multipart is not greenlet-safe, i.e. message parts might get
+        # split up if multiple greenlets call recv and/or recv_multipart on the same socket.
+        # so we use a lock to ensure that there's only ony greenlet
+        # calling recv_multipart at any time.
+        with self.__recv_lock:
+            return _original_Socket.recv_multipart(self, flags, copy, track)
+
+
