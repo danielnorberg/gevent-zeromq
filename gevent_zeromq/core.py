@@ -112,10 +112,10 @@ class _Socket(_original_Socket):
             self.__readable.set()
             return
 
-        events = self.__getsockopt(zmq.EVENTS)
-        if events & zmq.POLLOUT:
+        events = self.__getsockopt(EVENTS)
+        if events & POLLOUT:
             self.__writable.set()
-        if events & zmq.POLLIN:
+        if events & POLLIN:
             self.__readable.set()
 
     def _wait_write(self):
@@ -132,7 +132,7 @@ class _Socket(_original_Socket):
         if flags & NOBLOCK:
             # check if the send lock is taken in a non-blocking manner
             if not self.__send_lock.acquire(blocking=False):
-                raise ZMQError(zmq.EAGAIN)
+                raise ZMQError(EAGAIN)
             self.__send_lock.release()
             return super(_Socket, self).send(data, flags, copy, track)
 
@@ -166,7 +166,7 @@ class _Socket(_original_Socket):
         if flags & NOBLOCK:
             # check if the recv lock is taken in a non-blocking manner
             if not self.__recv_lock.acquire(blocking=False):
-                raise ZMQError(zmq.EAGAIN)
+                raise ZMQError(EAGAIN)
             self.__recv_lock.release()
             return _original_Socket.recv(self, flags, copy, track)
 

@@ -129,7 +129,7 @@ cdef class _Socket(_original_Socket):
         if flags & NOBLOCK:
             # check if the send lock is taken in a non-blocking manner
             if not self.__send_lock.acquire(blocking=False):
-                raise ZMQError(zmq.EAGAIN)
+                raise ZMQError(EAGAIN)
             self.__send_lock.release()
             return _original_Socket.send(self, data, flags, copy, track)
 
@@ -163,7 +163,7 @@ cdef class _Socket(_original_Socket):
         if flags & NOBLOCK:
             # check if the recv lock is taken in a non-blocking manner
             if not self.__recv_lock.acquire(blocking=False):
-                raise ZMQError(zmq.EAGAIN)
+                raise ZMQError(EAGAIN)
             self.__recv_lock.release()
             return _original_Socket.recv(self, flags, copy, track)
 
