@@ -58,6 +58,9 @@ class _Socket(_original_Socket):
     respectively. This also ensures that at most one waiting greenlet is awoken
     by send and recv.
 
+    getsockopt also consumes socket state change events, thus we also wake
+    waiting senders and receivers after an invocation of getsockopt.
+
     Some doubleunderscore prefixes are used to minimize pollution of
     :class:`zmq.core.socket.Socket`'s namespace.
     """
@@ -95,12 +98,12 @@ class _Socket(_original_Socket):
         callback = allow_unbound_disappear(
                 _Socket.__state_changed, self, _Socket)
         try:
-            self._state_event = get_hub().loop.io(self.getsockopt(FD), 1) # read state watcher
+            self._state_event = get_hub().loop.io(self.__getsockopt(FD), 1) # read state watcher
             self._state_event.start(callback)
         except AttributeError:
             # for gevent<1.0 compatibility
             from gevent.core import read_event
-            self._state_event = read_event(self.getsockopt(FD), callback, persist=True)
+            self._state_event = read_event(self.__getsockopt(FD), callback, persist=True)
 
     def __state_changed(self, event=None, _evtype=None):
         if self.closed:
@@ -109,7 +112,7 @@ class _Socket(_original_Socket):
             self.__readable.set()
             return
 
-        events = self.getsockopt(zmq.EVENTS)
+        events = self.__getsockopt(zmq.EVENTS)
         if events & zmq.POLLOUT:
             self.__writable.set()
         if events & zmq.POLLIN:
@@ -191,4 +194,13 @@ class _Socket(_original_Socket):
         with self.__recv_lock:
             return _original_Socket.recv_multipart(self, flags, copy, track)
 
+    def __getsockopt(self, option):
+        return super(_Socket, self).getsockopt(option)
 
+    def getsockopt(self, option):
+        try:
+            return self.__getsockopt(option)
+        finally:
+            # wake a waiting reader and a writer as the writable/readable state may have changed and getsockopt consumes socket state change events
+            self.__writable.set()
+            self.__readable.set()
